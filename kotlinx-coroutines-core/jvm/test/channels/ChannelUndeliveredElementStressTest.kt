@@ -25,7 +25,6 @@ class ChannelUndeliveredElementStressTest(private val kind: TestChannelKind) : T
         @JvmStatic
         fun params(): Collection<Array<Any>> =
             TestChannelKind.values()
-                .filter { it === TestChannelKind.UNLIMITED }
                 .filter { !it.viaBroadcast }
                 .map { arrayOf<Any>(it) }
     }
