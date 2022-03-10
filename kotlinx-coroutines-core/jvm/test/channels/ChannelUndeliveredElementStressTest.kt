@@ -118,7 +118,7 @@ class ChannelUndeliveredElementStressTest(private val kind: TestChannelKind) : T
         }
         val c = channel
         if (c is BufferedChannel<*>) {
-            assert(c.sendersCounter < (sentCnt + stoppedSender) * 1.1) {
+            assert(c.sendersCounter < (sentCnt + stoppedSender) * 1.2) {
                 "Too many broken cells: $sentCnt elements was sent and $stoppedSender send-s has been stopped, " +
                     "but sendersCounter equals ${c.sendersCounter}"
             }
