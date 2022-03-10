@@ -5,7 +5,6 @@ import kotlinx.coroutines.channels.*
 import org.junit.*
 import reactor.blockhound.*
 
-@Ignore
 @Suppress("UnusedEquals", "DeferredResultUnused", "BlockingMethodInNonBlockingContext")
 class BlockHoundTest : TestBase() {
 
@@ -114,5 +113,4 @@ class BlockHoundTest : TestBase() {
             }
         }
     }
-
 }
