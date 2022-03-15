@@ -17,7 +17,19 @@ import kotlin.random.*
 import kotlin.reflect.*
 
 /**
- * TODO huge documentation
+ * The buffered channel implementation, which also serves as a rendezvous channel when the capacity is zero.
+ * The high-level structure bases on a conceptually infinite array for storing elements and waiting requests,
+ * separate counters of [send] and [receive] invocations that were ever performed, and an additional counter
+ * that indicates the end of the logical buffer by counting the number of array cells it ever contained.
+ * The key idea is that both [send] and [receive] start by incrementing their counters, assigning the array cell
+ * referenced by the counter. In case of rendezvous channels, the operation either suspends and stores its continuation
+ * in the cell or makes a rendezvous with the opposite request. Each cell can be processed by exactly one [send] and
+ * one [receive]. As for buffered channels, [send]-s can also add elements without suspension if the logical buffer
+ * contains the cell, while the [receive] operation updates the end of the buffer when its synchronization finishes.
+ *
+ * Please see the paper "Fast and Scalable Channels with Applications to Kotlin Coroutines"
+ * by Nikita Koval, Roman Elizarov, and Dan Alistarh for the detailed algorithm description:
+ * TODO: link to arxiv
  */
 internal open class BufferedChannel<E>(
     /**
@@ -34,8 +46,15 @@ internal open class BufferedChannel<E>(
 
     /*
       The counters and the segments for send, receive, and buffer expansion operations.
-      The counters are incremented in the  beginning of the corresponding operation;
+      The counters are incremented in the beginning of the corresponding operation;
       thus, acquiring a unique (for the operation type) cell to process.
+
+      The counter for send is combined with the channel closing status for synchronization
+      simplicity and performance reasons.
+
+      The logical end of the buffer is initialized with the channel capacity. When the channel
+      is rendezvous or unlimited, the counter equals `BUFFER_END_RENDEZVOUS` or `BUFFER_END_RENDEZVOUS`,
+      correspondingly, and never updates.
      */
     private val sendersAndCloseStatus = atomic(0L)
     private val receivers = atomic(0L)
@@ -414,7 +433,7 @@ internal open class BufferedChannel<E>(
                 // The buffer has been expanded and this cell
                 // is covered by the buffer. Therefore, the algorithm
                 // tries to buffer the element.
-                state === SHOULD_BUFFER -> {
+                state === IN_BUFFER -> {
                     // Move the state to BUFFERED.
                     if (segment.casState(index, state, BUFFERED))
                         return if (s < receivers.value) RESULT_RENDEZVOUS else RESULT_BUFFERED
@@ -422,7 +441,7 @@ internal open class BufferedChannel<E>(
                 // Fail if the cell is broken by a concurrent receiver,
                 // or the receiver stored in this cell was interrupted.
                 // or the channel is closed.
-                state === BROKEN || state === INTERRUPTED || state === INTERRUPTED_EB || state === INTERRUPTED_R || state === CHANNEL_CLOSED -> {
+                state === BROKEN || state === INTERRUPTED || state === INTERRUPTED_EB || state === INTERRUPTED_SEND || state === CHANNEL_CLOSED -> {
                     // Clean the element slot to avoid memory leaks.
                     segment.cleanElement(index)
                     return RESULT_FAILED
@@ -693,7 +712,7 @@ internal open class BufferedChannel<E>(
                     return SUSPEND
                 }
             }
-            curState is Waiter -> if (segment.casState(i, curState, RESUMING_R)) {
+            curState is Waiter -> if (segment.casState(i, curState, S_RESUMING_RCV)) {
                 return if (curState.tryResumeSender(segment, i)) {
                     segment.setState(i, DONE)
                     expandBuffer()
@@ -716,7 +735,7 @@ internal open class BufferedChannel<E>(
         while (true) {
             val state = segment.getState(i)
             when {
-                state === null || state === SHOULD_BUFFER -> {
+                state === null || state === IN_BUFFER -> {
                     val sendersAndCloseStatusCur = sendersAndCloseStatus.value
                     if (sendersAndCloseStatusCur.isClosedForReceive0) {
                         segment.casState(i, state, CHANNEL_CLOSED)
@@ -750,18 +769,18 @@ internal open class BufferedChannel<E>(
                     }
                 }
                 state === INTERRUPTED -> {
-                    if (segment.casState(i, state, INTERRUPTED_R)) return FAILED
+                    if (segment.casState(i, state, INTERRUPTED_SEND)) return FAILED
                 }
                 state === INTERRUPTED_EB -> {
                     expandBuffer()
                     return FAILED
                 }
-                state === INTERRUPTED_R -> return FAILED
+                state === INTERRUPTED_SEND -> return FAILED
                 state === BROKEN -> return FAILED
                 state === CHANNEL_CLOSED -> return FAILED
-                state === RESUMING_EB -> continue // spin-wait
+                state === S_RESUMING_EB -> continue // spin-wait
                 else -> {
-                    if (segment.casState(i, state, RESUMING_R)) {
+                    if (segment.casState(i, state, S_RESUMING_RCV)) {
                         val helpExpandBuffer = state is WaiterEB
                         val sender = if (state is WaiterEB) state.waiter else state
                         if (sender.tryResumeSender(segment, i)) {
@@ -782,7 +801,7 @@ internal open class BufferedChannel<E>(
         i: Int,
         helpExpandBuffer: Boolean
     ) {
-        if (!segment.casState(i, RESUMING_R, INTERRUPTED_R) || helpExpandBuffer)
+        if (!segment.casState(i, S_RESUMING_RCV, INTERRUPTED_SEND) || helpExpandBuffer)
             expandBuffer()
     }
 
@@ -876,21 +895,21 @@ internal open class BufferedChannel<E>(
             val state = segm.getState(i)
             when {
                 state === null -> {
-                    if (segm.casState(i, state, SHOULD_BUFFER)) return true
+                    if (segm.casState(i, state, IN_BUFFER)) return true
                 }
                 state === BUFFERED || state === BROKEN || state === DONE || state === CHANNEL_CLOSED -> return true
-                state === RESUMING_R -> if (segm.casState(i, state, RESUMING_R_EB)) return true
+                state === S_RESUMING_RCV -> continue // spin wait
                 state === INTERRUPTED -> {
                     if (b >= receivers.value) return false
                     if (segm.casState(i, state, INTERRUPTED_EB)) return true
                 }
-                state === INTERRUPTED_R -> return false
+                state === INTERRUPTED_SEND -> return false
                 else -> {
                     check(state is Waiter || state is WaiterEB)
                     if (b < receivers.value) {
                         if (segm.casState(i, state, WaiterEB(waiter = state))) return true
                     } else {
-                        if (segm.casState(i, state, RESUMING_EB)) {
+                        if (segm.casState(i, state, S_RESUMING_EB)) {
                             return if (state.tryResumeSender(segm, i)) {
                                 segm.setState(i, BUFFERED)
                                 true
@@ -930,6 +949,14 @@ internal open class BufferedChannel<E>(
             clauseObject = this@BufferedChannel,
             regFunc = BufferedChannel<*>::registerSelectForReceive as RegistrationFunction,
             processResFunc = BufferedChannel<*>::processResultSelectReceiveCatching as ProcessResultFunction,
+            onCancellationConstructor = onUndeliveredElementReceiveCancellationConstructor
+        )
+
+    override val onReceiveOrNull: SelectClause1<E?>
+        get() = SelectClause1Impl(
+            clauseObject = this@BufferedChannel,
+            regFunc = BufferedChannel<*>::registerSelectForReceive as RegistrationFunction,
+            processResFunc = BufferedChannel<*>::processResultSelectReceiveOrNull as ProcessResultFunction,
             onCancellationConstructor = onUndeliveredElementReceiveCancellationConstructor
         )
 
@@ -1160,7 +1187,7 @@ internal open class BufferedChannel<E>(
                             segm.onCancellation(i)
                             break
                         }
-                        state === SHOULD_BUFFER || state === null -> if (segm.casState(i, state, CHANNEL_CLOSED)) {
+                        state === IN_BUFFER || state === null -> if (segm.casState(i, state, CHANNEL_CLOSED)) {
                             segm.onCancellation(i)
                             break
                         }
@@ -1193,7 +1220,7 @@ internal open class BufferedChannel<E>(
                 cell@while (true) {
                     val state = segm.getState(i)
                     when {
-                        state === null || state === SHOULD_BUFFER -> {
+                        state === null || state === IN_BUFFER -> {
                             if (segm.casState(i, state, CHANNEL_CLOSED)) break@cell
                         }
                         state is WaiterEB -> {
@@ -1467,7 +1494,7 @@ internal open class BufferedChannel<E>(
         while (true) {
             val state = segm.getState(i)
             when {
-                state === null || state === SHOULD_BUFFER -> {
+                state === null || state === IN_BUFFER -> {
                     if (segm.casState(i, state, BROKEN)) {
                         expandBuffer()
                         return true
@@ -1477,14 +1504,14 @@ internal open class BufferedChannel<E>(
                     return false
                 }
                 state === INTERRUPTED -> {
-                    if (segm.casState(i, state, INTERRUPTED_R)) return true
+                    if (segm.casState(i, state, INTERRUPTED_SEND)) return true
                 }
                 state === INTERRUPTED_EB -> return true
-                state === INTERRUPTED_R -> return true
+                state === INTERRUPTED_SEND -> return true
                 state === CHANNEL_CLOSED -> return true
                 state === DONE -> return true
                 state === BROKEN -> return true
-                state === RESUMING_EB || state === RESUMING_R_EB -> continue // spin-wait
+                state === S_RESUMING_EB || state === S_RESUMING_RCV -> continue // spin-wait
                 else -> return receivers.value != r
             }
         }
@@ -1578,9 +1605,6 @@ internal open class BufferedChannel<E>(
                "C=${sendersAndCloseStatus.value.closeStatus},data=${data},dataStartIndex=$dataStartIndex," +
                "S_SegmId=${sendSegment.value.id},R_SegmId=${receiveSegment.value.id},B_SegmId=${bufferEndSegment.value?.id}"
     }
-
-    override val onReceiveOrNull: SelectClause1<E?>
-        get() = TODO("Not yet implemented")
 }
 
 /**
@@ -1593,9 +1617,9 @@ internal class ChannelSegment<E>(id: Long, prev: ChannelSegment<E>?, pointers: I
     private val data = atomicArrayOfNulls<Any?>(SEGMENT_SIZE * 2) // 2 registers per slot: state + element
     override val numberOfSlots: Int get() = SEGMENT_SIZE
 
-    // ##########################################
-    // # Manipulation with the Element Register #
-    // ##########################################
+    // ########################################
+    // # Manipulation with the Element Fields #
+    // ########################################
 
     inline fun storeElement(index: Int, element: E) {
         setElementLazy(index, element)
@@ -1613,9 +1637,9 @@ internal class ChannelSegment<E>(id: Long, prev: ChannelSegment<E>?, pointers: I
         data[index * 2].lazySet(value)
     }
 
-    // ########################################
-    // # Manipulation with the State Register #
-    // ########################################
+    // ######################################
+    // # Manipulation with the State Fields #
+    // ######################################
 
     inline fun getState(index: Int): Any? = data[index * 2 + 1].value
 
@@ -1673,7 +1697,7 @@ private fun <T> CancellableContinuation<T>.tryResume0(
     }
 
 /*
-  When the channel is rendezvouze or unlimited, the `bufferEnd` counter
+  When the channel is rendezvous or unlimited, the `bufferEnd` counter
   should be initialized with the corresponding value below and never change.
   In this case, the `expandBuffer(..)` operation does nothing.
  */
@@ -1691,27 +1715,27 @@ private fun initialBufferEnd(capacity: Int): Long = when (capacity) {
   [Waiter] instances. Please see the [BufferedChannel]
   documentation for more details.
  */
-@SharedImmutable // The cell stores a buffered element.
+
+// The cell stores a buffered element.
+@SharedImmutable
 private val BUFFERED = Symbol("BUFFERED")
 // Concurrent `expandBuffer(..)` can inform the
 // upcoming sender that it should buffer the element.
 @SharedImmutable
-private val SHOULD_BUFFER = Symbol("SHOULD_BUFFER")
+private val IN_BUFFER = Symbol("SHOULD_BUFFER")
 // Indicates that a receiver (R suffix) is resuming
 // the suspended sender; after that, it should update
 // the state to either `DONE` (on success) or
 // `INTERRUPTED_R` (on failure).
 @SharedImmutable
-private val RESUMING_R = Symbol("RESUMING_R")
+private val S_RESUMING_RCV = Symbol("RESUMING_R")
 // Indicates that `expandBuffer(..)` is resuming the
 // suspended sender; after that, it should update the
 // state to either `BUFFERED` (on success) or
 // `INTERRUPTED_EB` (on failure).
 @SharedImmutable
-private val RESUMING_EB = Symbol("RESUMING_EB")
+private val S_RESUMING_EB = Symbol("RESUMING_EB")
 // TODO
-@SharedImmutable
-private val RESUMING_R_EB = Symbol("RESUMING_R_EB")
 @SharedImmutable
 private val BROKEN = Symbol("BROKEN")
 // When the element is successfully transferred (possibly,
@@ -1725,7 +1749,7 @@ private val DONE = Symbol("DONE")
 private val INTERRUPTED = Symbol("INTERRUPTED")
 // TODO
 @SharedImmutable
-private val INTERRUPTED_R = Symbol("INTERRUPTED_R")
+private val INTERRUPTED_SEND = Symbol("INTERRUPTED_SEND")
 // When the cell is already covered by both sender and
 // receiver (`sender` and `receivers` counters are greater
 // than the cell number), the `expandBuffer(..)` procedure
@@ -1736,7 +1760,7 @@ private val INTERRUPTED_R = Symbol("INTERRUPTED_R")
 // stored in the cell is sender. In turn, senders ignore this
 // information.
 private class WaiterEB(@JvmField val waiter: Any) {
-    override fun toString() = "ExpandBufferDesc($waiter)"
+    override fun toString() = "WaiterEB($waiter)"
 }
 // Similarly to the situation described for [WaiterEB],
 // the `expandBuffer(..)` procedure cannot distinguish

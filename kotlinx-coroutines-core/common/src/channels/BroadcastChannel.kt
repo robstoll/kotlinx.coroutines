@@ -59,7 +59,7 @@ public interface BroadcastChannel<E> : SendChannel<E> {
  * The resulting channel type depends on the specified [capacity] parameter:
  *
  * * when `capacity` positive, but less than [UNLIMITED] -- creates `ArrayBroadcastChannel` with a buffer of given capacity.
- *   **Note:** this channel looses all items that are send to it until the first subscriber appears;
+ *   **Note:** this channel looses all items that have been sent to it until the first subscriber appears;
  * * when `capacity` is [CONFLATED] -- creates [ConflatedBroadcastChannel] that conflates back-to-back sends;
  * * when `capacity` is [BUFFERED] -- creates `ArrayBroadcastChannel` with a default capacity.
  * * otherwise -- throws [IllegalArgumentException].
@@ -211,7 +211,7 @@ internal open class BroadcastChannelImpl<E>(
             if (capacity == CONFLATED) lastConflatedElement = element
             // Get a copy of subscriber list. Unfortunately,
             // it is impossible to send the element to the subscribers
-            // under the lock due to possible suspensiobs.
+            // under the lock due to possible suspensions.
             ArrayList(subscribers)
         }
         // The lock has been released. Send the element to the

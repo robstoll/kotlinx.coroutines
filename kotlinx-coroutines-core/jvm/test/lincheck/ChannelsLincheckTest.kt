@@ -46,18 +46,18 @@ class Buffered2BroadcastChannelLincheckTest : ChannelLincheckTestBase(
 )
 class SequentialBuffered2Channel : SequentialIntChannelBase(2)
 
-class UnlimitedChannelLincheckTest : ChannelLincheckTestBaseAllLinearizable(
+class UnlimitedChannelLincheckTest : ChannelLincheckTestBaseAll(
     c = Channel(UNLIMITED),
     sequentialSpecification = SequentialUnlimitedChannel::class.java
 )
 class SequentialUnlimitedChannel : SequentialIntChannelBase(UNLIMITED)
 
-class ConflatedChannelLincheckTest : ChannelLincheckTestBaseAllLinearizable(
+class ConflatedChannelLincheckTest : ChannelLincheckTestBaseAll(
     c = Channel(CONFLATED),
     sequentialSpecification = SequentialConflatedChannel::class.java,
     obstructionFree = false
 )
-class ConflatedBroadcastChannelLincheckTest : ChannelLincheckTestBaseAllLinearizable(
+class ConflatedBroadcastChannelLincheckTest : ChannelLincheckTestBaseAll(
     c = ChannelViaBroadcast(ConflatedBroadcastChannel()),
     sequentialSpecification = SequentialConflatedChannel::class.java,
     obstructionFree = false
@@ -67,7 +67,7 @@ class ConflatedBroadcastChannelLincheckTest : ChannelLincheckTestBaseAllLineariz
 }
 class SequentialConflatedChannel : SequentialIntChannelBase(CONFLATED)
 
-abstract class ChannelLincheckTestBaseAllLinearizable(
+abstract class ChannelLincheckTestBaseAll(
     c: Channel<Int>,
     sequentialSpecification: Class<*>,
     obstructionFree: Boolean = true
@@ -111,7 +111,7 @@ abstract class ChannelLincheckTestBase(
     }
 
     // @Operation TODO: `trySend()` is not linearizable as it can fail due to postponed buffer expansion
-    //            TODO: or make a rendezvous with `tryReceive`, such an elimination is disallowed
+    //            TODO: or make a rendezvous with `tryReceive`, which violates the sequential specification.
     open fun trySend(@Param(name = "value") value: Int): Any = c.trySend(value)
         .onSuccess { return true }
         .onFailure {
@@ -150,13 +150,13 @@ abstract class ChannelLincheckTestBase(
     @Operation(causesBlocking = true)
     fun cancel(@Param(name = "closeToken") token: Int) = c.cancel(NumberedCancellationException(token))
 
-    // @Operation TODO not linearizable for buffered channel :(
+    // @Operation TODO non-linearizable in BufferedChannel
     open fun isClosedForReceive() = c.isClosedForReceive
 
     @Operation
     fun isClosedForSend() = c.isClosedForSend
 
-    // @Operation TODO not linearizable for buffered channel :(
+    // @Operation TODO non-linearizable in BufferedChannel
     open fun isEmpty() = c.isEmpty
 
     @StateRepresentation
