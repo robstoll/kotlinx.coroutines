@@ -27,7 +27,7 @@ internal open class ConflatedBufferedChannel<E>(
     private val onBufferOverflow: BufferOverflow,
     onUndeliveredElement: OnUndeliveredElement<E>? = null
 ) : BufferedChannel<E>(capacity = capacity, onUndeliveredElement = onUndeliveredElement) {
-    private val lock = reentrantLock() // guard all operations by this lock
+    private val lock = reentrantLock() // guards all channel operations
 
     init {
         require(onBufferOverflow !== SUSPEND) {
