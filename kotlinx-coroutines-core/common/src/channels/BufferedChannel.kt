@@ -861,34 +861,34 @@ internal open class BufferedChannel<E>(
     }
 
     private fun updateCellExpandBuffer(
-        segm: ChannelSegment<E>,
+        segment: ChannelSegment<E>,
         i: Int,
         b: Long
     ): Boolean {
         while (true) {
-            val state = segm.getState(i)
+            val state = segment.getState(i)
             when {
                 state === null -> {
-                    if (segm.casState(i, state, IN_BUFFER)) return true
+                    if (segment.casState(i, state, IN_BUFFER)) return true
                 }
                 state === BUFFERED || state === BROKEN || state === DONE || state === CHANNEL_CLOSED -> return true
                 state === S_RESUMING_RCV -> continue // spin wait
                 state === INTERRUPTED -> {
                     if (b >= receivers.value) return false
-                    if (segm.casState(i, state, INTERRUPTED_EB)) return true
+                    if (segment.casState(i, state, INTERRUPTED_EB)) return true
                 }
                 state === INTERRUPTED_SEND -> return false
                 else -> {
                     check(state is Waiter || state is WaiterEB)
                     if (b < receivers.value) {
-                        if (segm.casState(i, state, WaiterEB(waiter = state as Waiter))) return true
+                        if (segment.casState(i, state, WaiterEB(waiter = state as Waiter))) return true
                     } else {
-                        if (segm.casState(i, state, S_RESUMING_EB)) {
-                            return if (state.tryResumeSender(segm, i)) {
-                                segm.setState(i, BUFFERED)
+                        if (segment.casState(i, state, S_RESUMING_EB)) {
+                            return if (state.tryResumeSender(segment, i)) {
+                                segment.setState(i, BUFFERED)
                                 true
                             } else {
-                                segm.setState(i, INTERRUPTED)
+                                segment.setState(i, INTERRUPTED)
                                 false
                             }
                         }
@@ -1709,7 +1709,10 @@ private val S_RESUMING_RCV = Symbol("RESUMING_R")
 // `INTERRUPTED_EB` (on failure).
 @SharedImmutable
 private val S_RESUMING_EB = Symbol("RESUMING_EB")
-// TODO
+// When a receiver comes to the cell already covered by
+// a sender (according to the counters), but the cell
+// is still in `EMPTY` or `IN_BUFFER` state, it poisons
+// the cell by changing its state to `BROKEN`.
 @SharedImmutable
 private val BROKEN = Symbol("BROKEN")
 // When the element is successfully transferred (possibly,
