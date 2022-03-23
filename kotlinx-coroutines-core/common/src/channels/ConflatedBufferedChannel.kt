@@ -74,7 +74,8 @@ internal open class ConflatedBufferedChannel<E>(
     }
 
     override fun iterator(): ChannelIterator<E> = ConflatedChannelIterator()
-    internal open inner class ConflatedChannelIterator : BufferedChannelIterator() {
+
+    private inner class ConflatedChannelIterator : BufferedChannelIterator() {
         override suspend fun hasNext(): Boolean {
             // Acquire the lock in the beginning of receive operation.
             // It automatically releases once the synchronization completes.

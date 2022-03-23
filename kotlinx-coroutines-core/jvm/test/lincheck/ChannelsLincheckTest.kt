@@ -85,7 +85,7 @@ abstract class ChannelLincheckTestBaseWithOnSend(
     sequentialSpecification: Class<*>,
     obstructionFree: Boolean = true
 ) : ChannelLincheckTestBase(c, sequentialSpecification, obstructionFree) {
-    @Operation(allowExtraSuspension = true)
+    @Operation(allowExtraSuspension = true, blocking = true)
     suspend fun sendViaSelect(@Param(name = "value") value: Int): Any = try {
         select<Unit> { c.onSend(value) {} }
     } catch (e: NumberedCancellationException) {
@@ -103,7 +103,7 @@ abstract class ChannelLincheckTestBase(
     private val obstructionFree: Boolean = true
 ) : AbstractLincheckTest() {
 
-    @Operation(allowExtraSuspension = true)
+    @Operation(allowExtraSuspension = true, blocking = true)
     suspend fun send(@Param(name = "value") value: Int): Any = try {
         c.send(value)
     } catch (e: NumberedCancellationException) {

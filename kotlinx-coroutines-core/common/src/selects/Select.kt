@@ -519,7 +519,11 @@ internal open class SelectImplementation<R> constructor(
                 }
                 // This `select` operation became completed during clauses re-registration.
                 curState is ClauseData<*> -> {
-                    cont.resume(Unit, curState.createOnCancellationAction(this, internalResult))
+                    cont.resume(Unit) {
+                        val internalResult = internalResult
+                        cleanup(curState as ClauseData<R>)
+                        curState.createOnCancellationAction(this, internalResult)?.invoke(it)
+                    }
                     return@sc
                 }
                 // This `select` cannot be in any other state.
@@ -622,11 +626,15 @@ internal open class SelectImplementation<R> constructor(
         // Get the selected clause.
         @Suppress("UNCHECKED_CAST")
         val selectedClause = state.value as ClauseData<R>
-        // Process the internal result.
-        val blockArgument = selectedClause.processResult(internalResult)
-        // Perform the clean-up before the user-specified block
-        // invocation to guarantee the absence of memory leaks.
-        cleanup(selectedClause)
+        // Process the internal result. Note that
+        // the corresponding function may throw an exception.
+        val blockArgument = try {
+             selectedClause.processResult(internalResult)
+        } finally {
+            // Perform the clean-up before the user-specified block
+            // invocation to guarantee the absence of memory leaks.
+            cleanup(selectedClause)
+        }
         // TAIL-CALL OPTIMIZATION: the `suspend` block
         // is invoked at the very end.
         return selectedClause.invokeBlock(blockArgument)
@@ -638,10 +646,10 @@ internal open class SelectImplementation<R> constructor(
      * clause registrations.
      */
     private fun cleanup(selectedClause: ClauseData<R>) {
-        assert { state.value == selectedClause }
+        assert { state.value === selectedClause }
         // Invoke all cancellation handlers except for the
         // one related to the selected clause, if specified.
-        clauses?.forEach { clause ->
+        clauses!!.forEach { clause ->
             if (clause !== selectedClause) clause.disposableHandle?.dispose()
         }
         // We do need to clean all the data to avoid memory leaks.
@@ -656,11 +664,11 @@ internal open class SelectImplementation<R> constructor(
         // Update the state.
         state.update { cur ->
             // Finish immediately when this `select` is already completed.
-            if (cur is ClauseData<*> || cur == STATE_COMPLETED) return
+            if (cur === STATE_COMPLETED) return
             update
         }
         // Remove this `select` instance from all the clause object (channels, mutexes, etc.).
-        clauses?.forEach { it.disposableHandle?.dispose() }
+        clauses!!.forEach { it.disposableHandle?.dispose() }
         // We do need to clean all the data to avoid memory leaks.
         internalResult = NO_RESULT
         clauses = null

@@ -305,7 +305,7 @@ internal open class BroadcastChannelImpl<E>(
                     // In case of re-registration (this `select` was still
                     // in the registration phase), the algorithm will invoke
                     // `registerSelectForSend`. As we stored an information that
-                    // this `onClose` clause is already selected (in `onSendInternalResult`),
+                    // this `onSend` clause is already selected (in `onSendInternalResult`),
                     // the algorithm, will complete immediately. Otherwise, to avoid memory
                     // leaks, we must remove this information from the hashmap.
                     onSendInternalResult.remove(select)
