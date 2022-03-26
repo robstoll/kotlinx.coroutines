@@ -321,25 +321,25 @@ internal open class BufferedChannel<E>(
         // This lambda is called when the channel
         // is observed in the closed state.
         onClosed: () -> R,
-    ): R {
+    ): R =
         // Update the cell with the non-null waiter,
-        // and restart from the beginning on failure.
+        // restarting from the beginning on failure.
         when(updateCellSend(segment, index, element, s, waiter)) {
             // See `sendImpl(..)` for the comments.
             RESULT_RENDEZVOUS -> {
                 segment.cleanPrev()
-                return onRendezvousOrBuffered()
+                onRendezvousOrBuffered()
             }
             RESULT_BUFFERED -> {
-                return onRendezvousOrBuffered()
+                onRendezvousOrBuffered()
             }
             RESULT_SUSPEND -> {
-                return onSuspend(segment, index)
+                onSuspend(segment, index)
             }
             RESULT_FAILED -> {
                 segment.cleanPrev()
                 // On failure, restart the operation from the beginning.
-                return sendImpl(
+                sendImpl(
                     element = element,
                     waiter = waiter,
                     onRendezvousOrBuffered = onRendezvousOrBuffered,
@@ -349,7 +349,6 @@ internal open class BufferedChannel<E>(
             }
             else -> error("unexpected")
         }
-    }
 
     /**
      * The algorithm that updates the working cell for an abstract send operation.
@@ -420,19 +419,18 @@ internal open class BufferedChannel<E>(
                 // A waiting receiver is stored in the cell.
                 else -> {
                     assert { state is Waiter || state is WaiterEB }
-                    // Try to move the cell state to DONE.
-                    if (segment.casState(index, state, DONE)) {
-                        // As the element will be passed directly to the waiter,
-                        // the algorithm cleans the element slot in the cell.
-                        segment.cleanElement(index)
-                        // Unwrap the waiting receiver from `WaiterEB` if needed.
-                        val receiver = if (state is WaiterEB) state.waiter else state
-                        // Try to make a rendezvous with the receiver.
-                        return if (receiver.tryResumeReceiver(element)) {
-                            onReceiveDequeued()
-                            RESULT_RENDEZVOUS
-                        } else RESULT_FAILED
-                    }
+                    // As the element will be passed directly to the waiter,
+                    // the algorithm cleans the element slot in the cell.
+                    segment.cleanElement(index)
+                    // Unwrap the waiting receiver from `WaiterEB` if needed.
+                    val receiver = if (state is WaiterEB) state.waiter else state
+                    // Try to make a rendezvous with the receiver.
+                    return if (receiver.tryResumeReceiver(element)) {
+                        // Move the cell state to DONE.
+                        segment.setStateLazy(index, DONE)
+                        onReceiveDequeued()
+                        RESULT_RENDEZVOUS
+                    } else RESULT_FAILED
                 }
             }
         }
@@ -670,33 +668,28 @@ internal open class BufferedChannel<E>(
     ): R {
         var segm = receiveSegment.value
         while (true) {
-            if (sendersAndCloseStatus.value.closeStatus == CLOSE_STATUS_CANCELLED)
+            if (sendersAndCloseStatus.value.isClosedForReceive0)
                 return onClosed()
             val r = this.receivers.getAndIncrement()
             val id = r / SEGMENT_SIZE
             val i = (r % SEGMENT_SIZE).toInt()
             if (segm.id != id) {
-                val findSegmResult = findSegmentReceive(id, segm)
-                if (findSegmResult.isClosed) {
-                    return onClosed()
-                }
-                segm = findSegmResult.segment
-                if (segm.id != id) continue
+                segm = findSegmentReceive(id, segm) ?: continue
             }
             val result = updateCellReceive(segm, i, r, waiter)
-            when {
+            return when {
                 result === SUSPEND -> {
-                    return onSuspend(segm, i)
+                    onSuspend(segm, i)
                 }
                 result === FAILED -> {
                     continue
                 }
-                result !== NO_WAITER -> { // element
-                    segm.cleanPrev()
-                    return onRendezvous(result as E)
-                }
                 result === NO_WAITER -> {
-                    return onNoWaiterSuspend(segm, i, r)
+                    onNoWaiterSuspend(segm, i, r)
+                }
+                else -> { // element
+                    segm.cleanPrev()
+                    onRendezvous(result as E)
                 }
             }
         }
@@ -742,10 +735,6 @@ internal open class BufferedChannel<E>(
             when {
                 state === null || state === IN_BUFFER -> {
                     val sendersAndCloseStatusCur = sendersAndCloseStatus.value
-                    if (sendersAndCloseStatusCur.isClosedForReceive0) {
-                        segment.casState(i, state, CHANNEL_CLOSED)
-                        continue
-                    }
                     if (r < sendersAndCloseStatusCur.counter) {
                         if (segment.casState(i, state, BROKEN)) {
                             expandBuffer()
@@ -794,26 +783,18 @@ internal open class BufferedChannel<E>(
         }
     }
 
-    private fun Any.tryResumeSender(): Boolean = when (this) {
-        is SelectInstance<*> -> trySelect(clauseObject = this@BufferedChannel, result = Unit)
-        is CancellableContinuation<*> -> tryResumeSender(Unit)
-        is SendBroadcast -> cont.tryResumeSender(true)
-        else -> error("Unexpected waiter: $this")
-    }
-
     /**
-     * Tries to resume suspended [send] or [SendBroadcast] operation.
+     * Tries to resume the suspended sender.
      */
-    private fun <T> CancellableContinuation<*>.tryResumeSender(result: T): Boolean {
-        this as CancellableContinuation<T>
-        return tryResume(result).let {
-            if (it !== null) {
-                completeResume(it)
-                true
-            } else {
-                false
-            }
+    private fun Any.tryResumeSender(): Boolean = when (this) {
+        is CancellableContinuation<*> -> { // suspended `send(e)` operation
+            @Suppress("UNCHECKED_CAST")
+            this as CancellableContinuation<Unit>
+            tryResume0(Unit)
         }
+        is SelectInstance<*> -> trySelect(clauseObject = this@BufferedChannel, result = Unit)
+        is SendBroadcast -> cont.tryResume0(true) // // suspended `sendBroadcast(e)` operation
+        else -> error("Unexpected waiter: $this")
     }
 
     /**
@@ -1567,13 +1548,18 @@ internal open class BufferedChannel<E>(
             if (receivers.compareAndSet(cur, value)) return
         }
 
-    private fun findSegmentReceive(id: Long, start: ChannelSegment<E>): SegmentOrClosed<ChannelSegment<E>> =
-        receiveSegment.findSegmentAndMoveForward(id, start, ::createSegment).also {
+    private fun findSegmentReceive(id: Long, start: ChannelSegment<E>) =
+        receiveSegment.findSegmentAndMoveForward(id, start, ::createSegment).let {
             if (it.isClosed) {
                 completeCloseOrCancel()
+                null
             } else {
-                if (it.segment.id != id)
-                    updateReceiversIfLower(it.segment.id * SEGMENT_SIZE)
+                val segm = it.segment
+                if (segm.id != id) {
+                    assert { segm.id > id }
+                    updateReceiversIfLower(segm.id * SEGMENT_SIZE)
+                    null
+                } else segm
             }
         }
 
